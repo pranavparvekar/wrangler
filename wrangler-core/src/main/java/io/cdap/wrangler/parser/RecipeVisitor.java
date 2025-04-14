@@ -334,7 +334,7 @@ public final class RecipeVisitor extends DirectivesBaseVisitor<RecipeSymbol.Buil
    * method extracts the time duration value and creates a token type <code>TimeDuration</code>.
    */
   @Override
-  public RecipeSymbol.Builder visitTimeDurationArg(DirectivesParser.ByteSizeArgContext ctx) {
+  public RecipeSymbol.Builder visitTimeDurationArg(DirectivesParser.TimeDurationArgContext ctx) {
     builder.addToken(new TimeDuration(ctx.getText()));
     return builder;
   }
