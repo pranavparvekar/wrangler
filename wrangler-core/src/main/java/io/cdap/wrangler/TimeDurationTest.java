@@ -27,7 +27,7 @@ public class TimeDurationTest {
 
   @Test
   public void testValidTimeDurations() {
-    Assert.assertEquals(5_000_000, new ByteSize("5ms").getNanoseconds());
+    Assert.assertEquals(5_000_000, new TimeDuration("5ms").getNanoseconds());
     Assert.assertEquals(2_100_000_000, new TimeDuration("2.1s").getNanoseconds());
     Assert.assertEquals(60_000_000_000L, new TimeDuration("1m").getNanoseconds());
     Assert.assertEquals(150_000_000, new TimeDuration("150MS").getNanoseconds()); // Case insensitivity
