@@ -14,113 +14,171 @@
  * the License.
  */
 
-package io.cdap.wrangler;
+package io.cdap.wrangler.parser;
 
-import io.cdap.wrangler.api.Arguments;
-import io.cdap.wrangler.api.Directive;
-import io.cdap.wrangler.api.DirectiveExecutionException;
-import io.cdap.wrangler.api.DirectiveParseException;
-import io.cdap.wrangler.api.ExecutorContext;
-import io.cdap.wrangler.api.Row;
-import io.cdap.wrangler.api.annotations.PublicEvolving;
-import io.cdap.wrangler.api.parser.ByteSize;
+import io.cdap.wrangler.api.RecipeException;
+import io.cdap.wrangler.api.RecipeSymbol;
+import io.cdap.wrangler.api.TokenGroup;
 import io.cdap.wrangler.api.parser.ColumnName;
-import io.cdap.wrangler.api.parser.TimeDuration;
+import io.cdap.wrangler.api.parser.DirectiveName;
+import io.cdap.wrangler.api.parser.Text;
+import io.cdap.wrangler.api.parser.Token;
 import io.cdap.wrangler.api.parser.TokenType;
-import io.cdap.wrangler.api.parser.UsageDefinition;
+import org.junit.Assert;
+import org.junit.Test;
 
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
 /**
- * A directive that aggregates byte size and time duration from two columns into total size (MB) and total time (seconds).
+ * Unit tests for GrammarBasedParser.
  */
-@PublicEvolving
-public class AggregateStats implements Directive {
-  public static final String NAME = "aggregate-stats";
-  private String sizeColumn;
-  private String timeColumn;
-  private String totalSizeColumn;
-  private String totalTimeColumn;
-  private static final String SIZE_KEY = "aggregate_stats_size";
-  private static final String TIME_KEY = "aggregate_stats_time";
-  private static final String COUNT_KEY = "aggregate_stats_count";
+public class GrammarBasedParserTest {
 
-  @Override
-  public UsageDefinition define() {
-    UsageDefinition.Builder builder = UsageDefinition.builder(NAME);
-    builder.define("size_col", TokenType.COLUMN_NAME);
-    builder.define("time_col", TokenType.COLUMN_NAME);
-    builder.define("total_size_col", TokenType.COLUMN_NAME);
-    builder.define("total_time_col", TokenType.COLUMN_NAME);
-    return builder.build();
+  @Test
+  public void testParseDirective() throws Exception {
+    String recipe = "parse-as-csv :body , true";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    RecipeSymbol symbol = parser.parse();
+
+    Iterator<TokenGroup> iterator = symbol.iterator();
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group = iterator.next();
+    List<Token> tokens = group.getTokens();
+    Assert.assertEquals(4, tokens.size());
+    Assert.assertEquals(TokenType.DIRECTIVE_NAME, tokens.get(0).type());
+    Assert.assertEquals("parse-as-csv", ((DirectiveName) tokens.get(0)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(1).type());
+    Assert.assertEquals("body", ((ColumnName) tokens.get(1)).value());
+    Assert.assertEquals(TokenType.TEXT, tokens.get(2).type());
+    Assert.assertEquals(",", ((Text) tokens.get(2)).value());
+    Assert.assertEquals(TokenType.BOOLEAN, tokens.get(3).type());
+    Assert.assertEquals("true", ((Text) tokens.get(3)).value());
   }
 
-  @Override
-  public void initialize(Arguments args) throws DirectiveParseException {
-    this.sizeColumn = ((ColumnName) args.value("size_col")).value();
-    this.timeColumn = ((ColumnName) args.value("time_col")).value();
-    this.totalSizeColumn = ((ColumnName) args.value("total_size_col")).value();
-    this.totalTimeColumn = ((ColumnName) args.value("total_time_col")).value();
+  @Test
+  public void testSetDirective() throws Exception {
+    String recipe = "set-column :new_col body + '_suffix'";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    RecipeSymbol symbol = parser.parse();
+
+    Iterator<TokenGroup> iterator = symbol.iterator();
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group = iterator.next();
+    List<Token> tokens = group.getTokens();
+    Assert.assertEquals(3, tokens.size());
+    Assert.assertEquals(TokenType.DIRECTIVE_NAME, tokens.get(0).type());
+    Assert.assertEquals("set-column", ((DirectiveName) tokens.get(0)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(1).type());
+    Assert.assertEquals("new_col", ((ColumnName) tokens.get(1)).value());
+    Assert.assertEquals(TokenType.EXPRESSION, tokens.get(2).type());
+    Assert.assertEquals("body + '_suffix'", ((Text) tokens.get(2)).value());
   }
 
-  @Override
-  public List<Row> execute(List<Row> rows, ExecutorContext context) throws DirectiveExecutionException {
-    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
-    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
-    long count = context != null ? context.getTransientStore().get(COUNT_KEY, Long.class, 0L) : 0L;
+  @Test
+  public void testDropDirective() throws Exception {
+    String recipe = "drop :col1 :col2";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    RecipeSymbol symbol = parser.parse();
 
-    for (Row row : rows) {
-      // Process byte size
-      Object sizeValue = row.getValue(sizeColumn);
-      if (sizeValue instanceof String) {
-        try {
-          ByteSize size = new ByteSize((String) sizeValue);
-          totalBytes += size.getBytes();
-          count++;
-        } catch (IllegalArgumentException e) {
-          // Skip invalid byte sizes
-        }
-      }
-
-      // Process time duration
-      Object timeValue = row.getValue(timeColumn);
-      if (timeValue instanceof String) {
-        try {
-          TimeDuration duration = new TimeDuration((String) timeValue);
-          totalNanos += duration.getNanoseconds();
-        } catch (IllegalArgumentException e) {
-          // Skip invalid durations
-        }
-      }
-    }
-
-    // Store totals
-    if (context != null) {
-      context.getTransientStore().put(SIZE_KEY, totalBytes);
-      context.getTransientStore().put(TIME_KEY, totalNanos);
-      context.getTransientStore().put(COUNT_KEY, count);
-    }
-
-    return rows; // Return input rows; finalize handles output
+    Iterator<TokenGroup> iterator = symbol.iterator();
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group = iterator.next();
+    List<Token> tokens = group.getTokens();
+    Assert.assertEquals(3, tokens.size());
+    Assert.assertEquals(TokenType.DIRECTIVE_NAME, tokens.get(0).type());
+    Assert.assertEquals("drop", ((DirectiveName) tokens.get(0)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(1).type());
+    Assert.assertEquals("col1", ((ColumnName) tokens.get(1)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(2).type());
+    Assert.assertEquals("col2", ((ColumnName) tokens.get(2)).value());
   }
 
-  @Override
-  public void destroy() {
-    // No-op
+  @Test
+  public void testAggregateStatsParsing() throws Exception {
+    String recipe = "aggregate-stats :data_transfer_size :response_time total_size_mb total_time_sec";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    RecipeSymbol symbol = parser.parse();
+
+    Iterator<TokenGroup> iterator = symbol.iterator();
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group = iterator.next();
+    List<Token> tokens = group.getTokens();
+    Assert.assertEquals(5, tokens.size());
+    Assert.assertEquals(TokenType.DIRECTIVE_NAME, tokens.get(0).type());
+    Assert.assertEquals("aggregate-stats", ((DirectiveName) tokens.get(0)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(1).type());
+    Assert.assertEquals("data_transfer_size", ((ColumnName) tokens.get(1)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(2).type());
+    Assert.assertEquals("response_time", ((ColumnName) tokens.get(2)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(3).type());
+    Assert.assertEquals("total_size_mb", ((ColumnName) tokens.get(3)).value());
+    Assert.assertEquals(TokenType.COLUMN_NAME, tokens.get(4).type());
+    Assert.assertEquals("total_time_sec", ((ColumnName) tokens.get(4)).value());
   }
 
-  public Row finalize(ExecutorContext context) throws DirectiveExecutionException {
-    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
-    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
+  @Test(expected = RecipeException.class)
+  public void testInvalidAggregateStatsSyntax() throws Exception {
+    String recipe = "aggregate-stats :size"; // Missing arguments
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    parser.parse();
+  }
 
-    // Convert to output units
-    double totalMB = totalBytes / (1024.0 * 1024.0); // MB = 1024 * 1024 bytes
-    double totalSeconds = totalNanos / 1_000_000_000.0; // Seconds = 10^9 nanos
+  @Test
+  public void testMultipleDirectives() throws Exception {
+    List<String> recipes = Arrays.asList(
+      "parse-as-json :body",
+      "drop :temp_col",
+      "aggregate-stats :data_transfer_size :response_time total_size_mb total_time_sec"
+    );
+    GrammarBasedParser parser = new GrammarBasedParser("test", recipes, false);
+    RecipeSymbol symbol = parser.parse();
 
-    Row result = new Row();
-    result.add(totalSizeColumn, totalMB);
-    result.add(totalTimeColumn, totalSeconds);
-    return result;
+    Iterator<TokenGroup> iterator = symbol.iterator();
+
+    // First directive: parse-as-json
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group1 = iterator.next();
+    List<Token> tokens1 = group1.getTokens();
+    Assert.assertEquals(2, tokens1.size());
+    Assert.assertEquals("parse-as-json", ((DirectiveName) tokens1.get(0)).value());
+    Assert.assertEquals("body", ((ColumnName) tokens1.get(1)).value());
+
+    // Second directive: drop
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group2 = iterator.next();
+    List<Token> tokens2 = group2.getTokens();
+    Assert.assertEquals(2, tokens2.size());
+    Assert.assertEquals("drop", ((DirectiveName) tokens2.get(0)).value());
+    Assert.assertEquals("temp_col", ((ColumnName) tokens2.get(1)).value());
+
+    // Third directive: aggregate-stats
+    Assert.assertTrue(iterator.hasNext());
+    TokenGroup group3 = iterator.next();
+    List<Token> tokens3 = group3.getTokens();
+    Assert.assertEquals(5, tokens3.size());
+    Assert.assertEquals("aggregate-stats", ((DirectiveName) tokens3.get(0)).value());
+    Assert.assertEquals("data_transfer_size", ((ColumnName) tokens3.get(1)).value());
+    Assert.assertEquals("response_time", ((ColumnName) tokens3.get(2)).value());
+    Assert.assertEquals("total_size_mb", ((ColumnName) tokens3.get(3)).value());
+    Assert.assertEquals("total_time_sec", ((ColumnName) tokens3.get(4)).value());
+
+    Assert.assertFalse(iterator.hasNext());
+  }
+
+  @Test(expected = RecipeException.class)
+  public void testUnknownDirective() throws Exception {
+    String recipe = "unknown-directive :col";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    parser.parse();
+  }
+
+  @Test(expected = RecipeException.class)
+  public void testEmptyRecipe() throws Exception {
+    String recipe = "";
+    GrammarBasedParser parser = new GrammarBasedParser("test", Collections.singletonList(recipe), false);
+    parser.parse();
   }
 }
