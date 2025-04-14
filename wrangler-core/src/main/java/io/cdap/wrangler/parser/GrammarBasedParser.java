@@ -1,103 +1,126 @@
 /*
- *  Copyright © 2017-2019 Cask Data, Inc.
+ * Copyright © 2017-2019 Cask Data, Inc.
  *
- *  Licensed under the Apache License, Version 2.0 (the "License"); you may not
- *  use this file except in compliance with the License. You may obtain a copy of
- *  the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy of
+ * the License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- *  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- *  License for the specific language governing permissions and limitations under
- *  the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
  */
 
-package io.cdap.wrangler.parser;
+package io.cdap.wrangler;
 
-import com.google.common.base.Joiner;
 import io.cdap.wrangler.api.Arguments;
 import io.cdap.wrangler.api.Directive;
-import io.cdap.wrangler.api.DirectiveContext;
-import io.cdap.wrangler.api.DirectiveLoadException;
-import io.cdap.wrangler.api.DirectiveNotFoundException;
+import io.cdap.wrangler.api.DirectiveExecutionException;
 import io.cdap.wrangler.api.DirectiveParseException;
-import io.cdap.wrangler.api.RecipeException;
-import io.cdap.wrangler.api.RecipeParser;
+import io.cdap.wrangler.api.ExecutorContext;
+import io.cdap.wrangler.api.Row;
+import io.cdap.wrangler.api.annotations.PublicEvolving;
+import io.cdap.wrangler.api.parser.ByteSize;
+import io.cdap.wrangler.api.parser.ColumnName;
+import io.cdap.wrangler.api.parser.TimeDuration;
+import io.cdap.wrangler.api.parser.TokenType;
 import io.cdap.wrangler.api.parser.UsageDefinition;
-import io.cdap.wrangler.registry.DirectiveInfo;
-import io.cdap.wrangler.registry.DirectiveRegistry;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * This class <code>GrammarBasedParser</code> is an implementation of <code>RecipeParser</code>.
- * It's responsible for compiling the recipe and checking all the directives exist before concluding
- * that the directives are ready for execution.
+ * A directive that aggregates byte size and time duration from two columns into total size (MB) and total time (seconds).
  */
-public class GrammarBasedParser implements RecipeParser {
-  private static final char EOL = '\n';
-  private final String namespace;
-  private final DirectiveRegistry registry;
-  private final String recipe;
-  private final DirectiveContext context;
+@PublicEvolving
+public class AggregateStats implements Directive {
+  public static final String NAME = "aggregate-stats";
+  private String sizeColumn;
+  private String timeColumn;
+  private String totalSizeColumn;
+  private String totalTimeColumn;
+  private static final String SIZE_KEY = "aggregate_stats_size";
+  private static final String TIME_KEY = "aggregate_stats_time";
+  private static final String COUNT_KEY = "aggregate_stats_count";
 
-  public GrammarBasedParser(String namespace, String recipe, DirectiveRegistry registry) {
-    this(namespace, recipe, registry, new NoOpDirectiveContext());
-  }
-
-  public GrammarBasedParser(String namespace, String[] directives,
-                            DirectiveRegistry registry, DirectiveContext context) {
-    this(namespace, Joiner.on(EOL).join(directives), registry, context);
-  }
-
-  public GrammarBasedParser(String namespace, String recipe, DirectiveRegistry registry, DirectiveContext context) {
-    this.namespace = namespace;
-    this.recipe = recipe;
-    this.registry = registry;
-    this.context = context;
-  }
-
-  /**
-   * Parses the recipe provided to this class and instantiate a list of {@link Directive} from the recipe.
-   *
-   * @return List of {@link Directive}.
-   */
   @Override
-  public List<Directive> parse() throws RecipeException {
-    AtomicInteger directiveIndex = new AtomicInteger();
-    try {
-      List<Directive> result = new ArrayList<>();
+  public UsageDefinition define() {
+    UsageDefinition.Builder builder = UsageDefinition.builder(NAME);
+    builder.define("size_col", TokenType.COLUMN_NAME);
+    builder.define("time_col", TokenType.COLUMN_NAME);
+    builder.define("total_size_col", TokenType.COLUMN_NAME);
+    builder.define("total_time_col", TokenType.COLUMN_NAME);
+    return builder.build();
+  }
 
-      new GrammarWalker(new RecipeCompiler(), context).walk(recipe, (command, tokenGroup) -> {
-        directiveIndex.getAndIncrement();
-        DirectiveInfo info = registry.get(namespace, command);
-        if (info == null) {
-          throw new DirectiveNotFoundException(
-            String.format("Directive '%s' not found in system and user scope. Check the name of directive.", command)
-          );
-        }
+  @Override
+  public void initialize(Arguments args) throws DirectiveParseException {
+    this.sizeColumn = ((ColumnName) args.value("size_col")).value();
+    this.timeColumn = ((ColumnName) args.value("time_col")).value();
+    this.totalSizeColumn = ((ColumnName) args.value("total_size_col")).value();
+    this.totalTimeColumn = ((ColumnName) args.value("total_time_col")).value();
+  }
 
+  @Override
+  public List<Row> execute(List<Row> rows, ExecutorContext context) throws DirectiveExecutionException {
+    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
+    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
+    long count = context != null ? context.getTransientStore().get(COUNT_KEY, Long.class, 0L) : 0L;
+
+    for (Row row : rows) {
+      // Process byte size
+      Object sizeValue = row.getValue(sizeColumn);
+      if (sizeValue instanceof String) {
         try {
-          Directive directive = info.instance();
-          UsageDefinition definition = directive.define();
-          Arguments arguments = new MapArguments(definition, tokenGroup);
-          directive.initialize(arguments);
-          result.add(directive);
-
-        } catch (IllegalAccessException | InstantiationException e) {
-          throw new DirectiveLoadException(e.getMessage(), e);
+          ByteSize size = new ByteSize((String) sizeValue);
+          totalBytes += size.getBytes();
+          count++;
+        } catch (IllegalArgumentException e) {
+          // Skip invalid byte sizes
         }
-      });
+      }
 
-      return result;
-    } catch (DirectiveLoadException | DirectiveNotFoundException | DirectiveParseException e) {
-      throw new RecipeException(e.getMessage(), e, directiveIndex.get());
-    } catch (Exception e) {
-      throw new RecipeException(e.getMessage(), e);
+      // Process time duration
+      Object timeValue = row.getValue(timeColumn);
+      if (timeValue instanceof String) {
+        try {
+          TimeDuration duration = new TimeDuration((String) timeValue);
+          totalNanos += duration.getNanoseconds();
+        } catch (IllegalArgumentException e) {
+          // Skip invalid durations
+        }
+      }
     }
+
+    // Store totals
+    if (context != null) {
+      context.getTransientStore().put(SIZE_KEY, totalBytes);
+      context.getTransientStore().put(TIME_KEY, totalNanos);
+      context.getTransientStore().put(COUNT_KEY, count);
+    }
+
+    return rows; // Return input rows; finalize handles output
+  }
+
+  @Override
+  public void destroy() {
+    // No-op
+  }
+
+  public Row finalize(ExecutorContext context) throws DirectiveExecutionException {
+    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
+    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
+
+    // Convert to output units
+    double totalMB = totalBytes / (1024.0 * 1024.0); // MB = 1024 * 1024 bytes
+    double totalSeconds = totalNanos / 1_000_000_000.0; // Seconds = 10^9 nanos
+
+    Row result = new Row();
+    result.add(totalSizeColumn, totalMB);
+    result.add(totalTimeColumn, totalSeconds);
+    return result;
   }
 }
