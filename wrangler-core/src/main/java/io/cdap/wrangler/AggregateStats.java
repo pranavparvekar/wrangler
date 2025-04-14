@@ -25,7 +25,6 @@ import io.cdap.wrangler.api.Row;
 import io.cdap.wrangler.api.annotations.PublicEvolving;
 import io.cdap.wrangler.api.parser.ByteSize;
 import io.cdap.wrangler.api.parser.ColumnName;
-import io.cdap.wrangler.api.parser.Text;
 import io.cdap.wrangler.api.parser.TimeDuration;
 import io.cdap.wrangler.api.parser.TokenType;
 import io.cdap.wrangler.api.parser.UsageDefinition;
@@ -34,123 +33,94 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A directive that aggregates statistics for a specified column, supporting byte size and time duration.
+ * A directive that aggregates byte size and time duration from two columns into total size (MB) and total time (seconds).
  */
 @PublicEvolving
 public class AggregateStats implements Directive {
   public static final String NAME = "aggregate-stats";
-  private String column;
-  private String statName;
-  private ByteSize byteThreshold;
-  private TimeDuration timeThreshold;
-  private long totalBytes;
-  private long totalNanos;
-  private long count;
+  private String sizeColumn;
+  private String timeColumn;
+  private String totalSizeColumn;
+  private String totalTimeColumn;
+  private static final String SIZE_KEY = "aggregate_stats_size";
+  private static final String TIME_KEY = "aggregate_stats_time";
+  private static final String COUNT_KEY = "aggregate_stats_count";
 
   @Override
   public UsageDefinition define() {
     UsageDefinition.Builder builder = UsageDefinition.builder(NAME);
-    builder.define("column", TokenType.COLUMN_NAME);
-    builder.define("stat", TokenType.TEXT);
-    builder.define("threshold", TokenType.BYTE_SIZE, TokenType.TIME_DURATION, true);
+    builder.define("size_col", TokenType.COLUMN_NAME);
+    builder.define("time_col", TokenType.COLUMN_NAME);
+    builder.define("total_size_col", TokenType.COLUMN_NAME);
+    builder.define("total_time_col", TokenType.COLUMN_NAME);
     return builder.build();
   }
 
   @Override
   public void initialize(Arguments args) throws DirectiveParseException {
-    this.column = ((ColumnName) args.value("column")).value();
-    this.statName = ((Text) args.value("stat")).value();
-    if (args.contains("threshold")) {
-      Token threshold = args.value("threshold");
-      if (threshold.type() == TokenType.BYTE_SIZE) {
-        this.byteThreshold = (ByteSize) threshold;
-      } else if (threshold.type() == TokenType.TIME_DURATION) {
-        this.timeThreshold = (TimeDuration) threshold;
-      }
-    }
-    this.totalBytes = 0;
-    this.totalNanos = 0;
-    this.count = 0;
+    this.sizeColumn = ((ColumnName) args.value("size_col")).value();
+    this.timeColumn = ((ColumnName) args.value("time_col")).value();
+    this.totalSizeColumn = ((ColumnName) args.value("total_size_col")).value();
+    this.totalTimeColumn = ((ColumnName) args.value("total_time_col")).value();
   }
 
   @Override
   public List<Row> execute(List<Row> rows, ExecutorContext context) throws DirectiveExecutionException {
-    List<Row> results = new ArrayList<>();
-    for (Row row : rows) {
-      Object value = row.getValue(column);
-      if (value == null) {
-        results.add(row);
-        continue;
-      }
+    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
+    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
+    long count = context != null ? context.getTransientStore().get(COUNT_KEY, Long.class, 0L) : 0L;
 
-      boolean include = true;
-      if (byteThreshold != null && value instanceof String) {
+    for (Row row : rows) {
+      // Process byte size
+      Object sizeValue = row.getValue(sizeColumn);
+      if (sizeValue instanceof String) {
         try {
-          ByteSize size = new ByteSize((String) value);
-          if (size.getBytes() < byteThreshold.getBytes()) {
-            include = false;
-          } else {
-            totalBytes += size.getBytes();
-            count++;
-          }
+          ByteSize size = new ByteSize((String) sizeValue);
+          totalBytes += size.getBytes();
+          count++;
         } catch (IllegalArgumentException e) {
           // Skip invalid byte sizes
         }
-      } else if (timeThreshold != null && value instanceof String) {
+      }
+
+      // Process time duration
+      Object timeValue = row.getValue(timeColumn);
+      if (timeValue instanceof String) {
         try {
-          TimeDuration duration = new TimeDuration((String) value);
-          if (duration.getNanoseconds() < timeThreshold.getNanoseconds()) {
-            include = false;
-          } else {
-            totalNanos += duration.getNanoseconds();
-            count++;
-          }
+          TimeDuration duration = new TimeDuration((String) timeValue);
+          totalNanos += duration.getNanoseconds();
         } catch (IllegalArgumentException e) {
           // Skip invalid durations
         }
-      } else {
-        // No threshold; accumulate all valid values
-        if (value instanceof String) {
-          try {
-            ByteSize size = new ByteSize((String) value);
-            totalBytes += size.getBytes();
-            count++;
-          } catch (IllegalArgumentException e) {
-            try {
-              TimeDuration duration = new TimeDuration((String) value);
-              totalNanos += duration.getNanoseconds();
-              count++;
-            } catch (IllegalArgumentException e) {
-              // Skip invalid values
-            }
-          }
-        }
-      }
-
-      if (include) {
-        results.add(row);
       }
     }
 
-    // Add aggregated result to the last row
-    if (!results.isEmpty()) {
-      Row lastRow = results.get(results.size() - 1);
-      if (statName.equals("total_size_mb")) {
-        double totalMB = totalBytes / (1024.0 * 1024.0);
-        lastRow.addField(statName, totalMB);
-      } else if (statName.equals("avg_duration_ms")) {
-        double avgMs = count > 0 ? (totalNanos / 1_000_000.0) / count : 0;
-        lastRow.addField(statName, avgMs);
-      } else {
-        throw new DirectiveExecutionException(NAME, "Unsupported stat: " + statName);
-      }
+    // Store totals
+    if (context != null) {
+      context.getTransientStore().put(SIZE_KEY, totalBytes);
+      context.getTransientStore().put(TIME_KEY, totalNanos);
+      context.getTransientStore().put(COUNT_KEY, count);
     }
 
-    return results;
+    return rows; // Return input rows; finalize handles output
   }
 
   @Override
   public void destroy() {
     // No-op
+  }
+
+  public Row finalize(ExecutorContext context) throws DirectiveExecutionException {
+    long totalBytes = context != null ? context.getTransientStore().get(SIZE_KEY, Long.class, 0L) : 0L;
+    long totalNanos = context != null ? context.getTransientStore().get(TIME_KEY, Long.class, 0L) : 0L;
+
+    // Convert to output units
+    double totalMB = totalBytes / (1024.0 * 1024.0); // MB = 1024 * 1024 bytes
+    double totalSeconds = totalNanos / 1_000_000_000.0; // Seconds = 10^9 nanos
+
+    Row result = new Row();
+    result.add(totalSizeColumn, totalMB);
+    result.add(totalTimeColumn, totalSeconds);
+    return result;
   }
 }
