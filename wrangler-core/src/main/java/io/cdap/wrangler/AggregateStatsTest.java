@@ -20,6 +20,7 @@ import io.cdap.wrangler.api.Arguments;
 import io.cdap.wrangler.api.ExecutorContext;
 import io.cdap.wrangler.api.Row;
 import io.cdap.wrangler.api.parser.ColumnName;
+import io.cdap.wrangler.test.TestingRig;
 import io.cdap.wrangler.test.api.TestArguments;
 import io.cdap.wrangler.test.api.TestTransientStore;
 import org.junit.Assert;
@@ -33,6 +34,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for AggregateStats directive.
@@ -78,6 +81,25 @@ public class AggregateStatsTest {
     double expectedSeconds = (500_000_000 + 1_500_000_000 + 100_000_000) / 1_000_000_000.0;
     Assert.assertEquals(expectedMB, (Double) result.getValue("total_size_mb"), 0.001);
     Assert.assertEquals(expectedSeconds, (Double) result.getValue("total_time_sec"), 0.001);
+  }
+
+  @Test
+  public void testWithTestingRig() throws Exception {
+    String[] recipe = new String[] {
+      "aggregate-stats :data_transfer_size :response_time total_size_mb total_time_sec"
+    };
+    List<Row> rows = new ArrayList<>();
+    rows.add(new Row("data_transfer_size", "10MB").add("response_time", "500ms"));
+    rows.add(new Row("data_transfer_size", "5MB").add("response_time", "1.5s"));
+    rows.add(new Row("data_transfer_size", "1KB").add("response_time", "100ms"));
+
+    List<Row> results = TestingRig.execute(recipe, rows);
+
+    Assert.assertEquals(1, results.size());
+    double expectedMB = (10 * 1024 * 1024 + 5 * 1024 * 1024 + 1024) / (1024.0 * 1024.0);
+    double expectedSeconds = (500_000_000 + 1_500_000_000 + 100_000_000) / 1_000_000_000.0;
+    Assert.assertEquals(expectedMB, (Double) results.get(0).getValue("total_size_mb"), 0.001);
+    Assert.assertEquals(expectedSeconds, (Double) results.get(0).getValue("total_time_sec"), 0.001);
   }
 
   @Test
